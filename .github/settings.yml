@@ -1,0 +1,59 @@
+repository:
+  name: uds-ipc
+  description: Unix Domain Socket IPC library for Go
+  homepage: https://github.com/Psiphon-Inc/uds-ipc
+  default_branch: main
+  topics:
+    - go
+    - golang
+    - ipc
+    - unix-domain-socket
+
+  security:
+    enableVulnerabilityAlerts: true
+    enableAutomatedSecurityFixes: true
+
+  private: false
+  has_issues: false
+  has_projects: false
+  has_wiki: false
+  has_downloads: true
+
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: true
+  allow_auto_merge: true
+  delete_branch_on_merge: true
+  allow_update_branch: true
+  use_squash_pr_title_as_default: false
+  squash_merge_commit_title: COMMIT_OR_PR_TITLE
+  squash_merge_commit_message: COMMIT_MESSAGES
+  merge_commit_title: MERGE_MESSAGE
+  merge_commit_message: PR_TITLE
+
+  archived: false
+  disabled: false
+
+branches:
+  - name: main
+    protection:
+      required_status_checks:
+        strict: true
+        checks:
+          - context: "lint"
+          - context: "test (stable)"
+          - context: "test (oldstable)"
+          - context: "benchmark"
+          - context: "security"
+      enforce_admins: false
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+        dismiss_stale_reviews: true
+        require_code_owner_reviews: false
+        require_last_push_approval: true
+      restrictions: null
+      allow_force_pushes: false
+      allow_deletions: false
+      block_creations: false
+      required_linear_history: true
+      allow_fork_syncing: true
