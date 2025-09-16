@@ -187,6 +187,16 @@ func TestReaderOptions(t *testing.T) {
 				return nil
 			},
 		},
+		{
+			name:   "WithReadBufferSize",
+			option: WithReadBufferSize(128 * 1024),
+			verify: func(r *Reader) error {
+				if r.readBufferSize != 128*1024 {
+					return fmt.Errorf("expected readBufferSize=128KB, got %d", r.readBufferSize)
+				}
+				return nil
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -494,5 +504,133 @@ func TestReaderContextCancellation(t *testing.T) {
 	// Should be able to stop cleanly
 	if err := reader.Stop(); err != nil {
 		t.Errorf("Stop() error = %v", err)
+	}
+}
+
+// mockFailingListener simulates a listener that fails Accept() calls
+type mockFailingListener struct {
+	acceptCalled int
+	maxFails     int
+	closed       bool
+}
+
+func (m *mockFailingListener) Accept() (net.Conn, error) {
+	m.acceptCalled++
+	if m.closed {
+		return nil, net.ErrClosed
+	}
+	if m.acceptCalled <= m.maxFails {
+		return nil, fmt.Errorf("simulated accept failure %d", m.acceptCalled)
+	}
+	// After planned failures, return closed to exit the accept loop cleanly
+	return nil, net.ErrClosed
+}
+
+func (m *mockFailingListener) Close() error {
+	m.closed = true
+	return nil
+}
+
+func (m *mockFailingListener) Addr() net.Addr { return nil }
+
+func TestReaderAcceptErrorHandling(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                    string
+		maxAcceptErrors         int
+		simulatedFailures       int
+		expectTooManyCallback   bool
+		expectEarlyReturn       bool
+	}{
+		{
+			name:                  "below_threshold",
+			maxAcceptErrors:       5,
+			simulatedFailures:     3,
+			expectTooManyCallback: false,
+			expectEarlyReturn:     false,
+		},
+		{
+			name:                  "exceed_threshold",
+			maxAcceptErrors:       1,
+			simulatedFailures:     2,
+			expectTooManyCallback: true,
+			expectEarlyReturn:     true,
+		},
+		{
+			name:                  "at_threshold",
+			maxAcceptErrors:       3,
+			simulatedFailures:     3,
+			expectTooManyCallback: false,
+			expectEarlyReturn:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var errorCallbacks []string
+			var errorMu sync.Mutex
+
+			errorCallback := func(err error, context string) {
+				errorMu.Lock()
+				errorCallbacks = append(errorCallbacks, context)
+				errorMu.Unlock()
+			}
+
+			socketPath, err := LocalPath()
+			if err != nil {
+				t.Fatalf("LocalPath() error = %v", err)
+			}
+			defer os.Remove(socketPath)
+
+			reader, err := NewReader(
+				func([]byte) error { return nil },
+				socketPath,
+				WithMaxAcceptErrors(tt.maxAcceptErrors),
+				WithReaderErrorCallback(errorCallback),
+			)
+			if err != nil {
+				t.Fatalf("NewReader() error = %v", err)
+			}
+
+			// Replace listener with mock
+			mockListener := &mockFailingListener{maxFails: tt.simulatedFailures}
+			reader.listener = mockListener
+
+			if err := reader.Start(); err != nil {
+				t.Fatalf("reader.Start() error = %v", err)
+			}
+
+			// Allow time for accept loop to process failures and potentially hit threshold
+			if tt.expectTooManyCallback {
+				// Need more time for threshold to be exceeded and callback to fire
+				time.Sleep(300 * time.Millisecond)
+			} else {
+				// Shorter wait for cases that don't need to exceed threshold
+				time.Sleep(200 * time.Millisecond)
+			}
+
+			if err := reader.Stop(); err != nil {
+				t.Errorf("reader.Stop() error = %v", err)
+			}
+
+			// Check error callbacks
+			errorMu.Lock()
+			hasTooManyCallback := false
+			for _, context := range errorCallbacks {
+				if strings.Contains(context, "too many consecutive failures in accept loop") {
+					hasTooManyCallback = true
+					break
+				}
+			}
+			errorMu.Unlock()
+
+			if tt.expectTooManyCallback != hasTooManyCallback {
+				t.Errorf("expectTooManyCallback=%v, got hasTooManyCallback=%v",
+					tt.expectTooManyCallback, hasTooManyCallback)
+			}
+		})
 	}
 }

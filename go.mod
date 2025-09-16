@@ -1,3 +1,3 @@
 module github.com/Psiphon-Inc/uds-ipc
 
-go 1.24.4
+go 1.24.0
