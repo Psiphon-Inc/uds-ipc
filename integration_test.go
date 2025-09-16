@@ -17,6 +17,7 @@ limitations under the License.
 package udsipc
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -140,7 +141,7 @@ func TestReaderWriterIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewWriter() error = %v", err)
 			}
-			defer writer.Stop()
+			defer writer.Stop(context.Background())
 
 			// Start reader first
 			if err := reader.Start(); err != nil {
@@ -264,7 +265,7 @@ func TestReaderWriterConnectionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	// Start writer first (will fail to connect initially)
 	writer.Start()
@@ -382,7 +383,7 @@ func TestReaderWriterConcurrentSenders(t *testing.T) {
 				t.Errorf("NewWriter() error = %v", err)
 				return
 			}
-			defer writer.Stop()
+			defer writer.Stop(context.Background())
 
 			writer.Start()
 
@@ -479,7 +480,7 @@ func TestReaderWriterHandlerError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		t.Fatalf("reader.Start() error = %v", err)

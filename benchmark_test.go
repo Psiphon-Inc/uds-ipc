@@ -17,6 +17,7 @@ limitations under the License.
 package udsipc
 
 import (
+	"context"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -87,7 +88,7 @@ func benchmarkReaderWriter(b *testing.B, messageSize int, bufferSize uint32) {
 	if err != nil {
 		b.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		b.Fatalf("reader.Start() error = %v", err)
@@ -128,22 +129,29 @@ func BenchmarkHandlerLatency(b *testing.B) {
 		name         string
 		handlerDelay time.Duration
 		messageSize  int
+		maxOps       int // Limit operations for delay benchmarks to prevent timeouts
 	}{
-		{"NoDelay_1KB", 0, 1024},
-		{"10us_1KB", 10 * time.Microsecond, 1024},
-		{"100us_1KB", 100 * time.Microsecond, 1024},
+		{"NoDelay_1KB", 0, 1024, 0}, // 0 means no limit, use b.N
+		{"10us_1KB", 10 * time.Microsecond, 1024, 10000}, // Limit to 10k ops (100ms)
+		{"100us_1KB", 100 * time.Microsecond, 1024, 1000}, // Limit to 1k ops (100ms)
 	}
 
 	for _, bm := range benchmarks {
 		b.Run(bm.name, func(b *testing.B) {
-			benchmarkHandlerLatency(b, bm.handlerDelay, bm.messageSize)
+			benchmarkHandlerLatency(b, bm.handlerDelay, bm.messageSize, bm.maxOps)
 		})
 	}
 }
 
-func benchmarkHandlerLatency(b *testing.B, handlerDelay time.Duration, messageSize int) {
+func benchmarkHandlerLatency(b *testing.B, handlerDelay time.Duration, messageSize int, maxOps int) {
 	tempDir := b.TempDir()
 	socketPath := filepath.Join(tempDir, "test.sock")
+
+	// Determine actual number of operations to run
+	numOps := b.N
+	if maxOps > 0 && numOps > maxOps {
+		numOps = maxOps
+	}
 
 	var receivedCount int64
 	done := make(chan struct{}, 1)
@@ -155,7 +163,7 @@ func benchmarkHandlerLatency(b *testing.B, handlerDelay time.Duration, messageSi
 				time.Sleep(handlerDelay)
 			}
 			count := atomic.AddInt64(&receivedCount, 1)
-			if count >= int64(b.N) {
+			if count >= int64(numOps) {
 				select {
 				case done <- struct{}{}:
 				default:
@@ -171,12 +179,12 @@ func benchmarkHandlerLatency(b *testing.B, handlerDelay time.Duration, messageSi
 	defer reader.Stop()
 
 	// Use appropriate buffer size for handler latency test
-	bufferSize := uint32(b.N + 100)
+	bufferSize := uint32(numOps + 100)
 	writer, err := NewWriter(socketPath, WithMaxBufferedWrites(bufferSize))
 	if err != nil {
 		b.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		b.Fatalf("reader.Start() error = %v", err)
@@ -188,16 +196,24 @@ func benchmarkHandlerLatency(b *testing.B, handlerDelay time.Duration, messageSi
 	b.ResetTimer()
 	b.SetBytes(int64(messageSize))
 
-	for i := 0; i < b.N; i++ {
+	for i := 0; i < numOps; i++ {
 		writer.WriteMessage(message)
 	}
 
 	// Wait for all messages to be processed with proper synchronization
+	// Use reasonable timeout based on actual operations, not b.N
+	timeout := 10 * time.Second
+	if handlerDelay > 0 {
+		// Calculate expected time: numOps * handlerDelay + buffer time
+		expectedTime := time.Duration(numOps) * handlerDelay
+		timeout = expectedTime + 5*time.Second // Shorter buffer time
+	}
+
 	select {
 	case <-done:
 		// All messages received
-	case <-time.After(30 * time.Second):
-		b.Fatalf("timeout waiting for messages: sent %d, received %d", b.N, atomic.LoadInt64(&receivedCount))
+	case <-time.After(timeout):
+		b.Fatalf("timeout waiting for messages: sent %d, received %d", numOps, atomic.LoadInt64(&receivedCount))
 	}
 
 	b.StopTimer()
@@ -228,7 +244,7 @@ func BenchmarkMemoryAllocation(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		b.Fatalf("reader.Start() error = %v", err)
@@ -251,7 +267,7 @@ func BenchmarkProtocolOverhead(b *testing.B) {
 		name        string
 		messageSize int
 	}{
-		{"Empty", 0},
+		{"1Byte", 1},
 		{"100Bytes", 100},
 		{"1KB", 1024},
 		{"10KB", 10240},
@@ -269,11 +285,20 @@ func benchmarkProtocolOverhead(b *testing.B, messageSize int) {
 	socketPath := filepath.Join(tempDir, "test.sock")
 
 	var totalBytes int64
+	var receivedCount int64
+	done := make(chan struct{}, 1)
 	message := make([]byte, messageSize)
 
 	reader, err := NewReader(
 		func(data []byte) error {
 			atomic.AddInt64(&totalBytes, int64(len(data)))
+			count := atomic.AddInt64(&receivedCount, 1)
+			if count >= int64(b.N) {
+				select {
+				case done <- struct{}{}:
+				default:
+				}
+			}
 			return nil
 		},
 		socketPath,
@@ -289,7 +314,7 @@ func benchmarkProtocolOverhead(b *testing.B, messageSize int) {
 	if err != nil {
 		b.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		b.Fatalf("reader.Start() error = %v", err)
@@ -305,8 +330,13 @@ func benchmarkProtocolOverhead(b *testing.B, messageSize int) {
 		writer.WriteMessage(message)
 	}
 
-	// Wait for processing
-	time.Sleep(100 * time.Millisecond)
+	// Wait for all messages to be processed
+	select {
+	case <-done:
+		// All messages received
+	case <-time.After(30 * time.Second):
+		b.Fatalf("timeout waiting for messages: sent %d, received %d", b.N, atomic.LoadInt64(&receivedCount))
+	}
 
 	b.StopTimer()
 

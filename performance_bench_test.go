@@ -17,6 +17,7 @@ limitations under the License.
 package udsipc
 
 import (
+	"context"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -47,7 +48,7 @@ func BenchmarkBasicThroughput(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		b.Fatalf("reader.Start() error = %v", err)
@@ -115,7 +116,7 @@ func BenchmarkMessageSizes(b *testing.B) {
 			if err != nil {
 				b.Fatalf("NewWriter() error = %v", err)
 			}
-			defer writer.Stop()
+			defer writer.Stop(context.Background())
 
 			if err := reader.Start(); err != nil {
 				b.Fatalf("reader.Start() error = %v", err)
@@ -194,7 +195,7 @@ func BenchmarkBufferOptimization(b *testing.B) {
 			if err != nil {
 				b.Fatalf("NewWriter() error = %v", err)
 			}
-			defer writer.Stop()
+			defer writer.Stop(context.Background())
 
 			if err := reader.Start(); err != nil {
 				b.Fatalf("reader.Start() error = %v", err)
@@ -266,7 +267,7 @@ func BenchmarkMultipleWriters(b *testing.B) {
 					b.Fatalf("NewWriter() error = %v", err)
 				}
 				writers[i] = writer
-				defer writer.Stop()
+				defer writer.Stop(context.Background())
 			}
 
 			if err := reader.Start(); err != nil {
@@ -326,7 +327,7 @@ func BenchmarkWriteOnly(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		b.Fatalf("reader.Start() error = %v", err)
@@ -385,7 +386,7 @@ func BenchmarkReadOnly(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		b.Fatalf("reader.Start() error = %v", err)

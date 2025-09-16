@@ -18,6 +18,7 @@ package udsipc
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -135,7 +136,9 @@ func TestNewWriter(t *testing.T) {
 			}
 
 			// Clean up
-			writer.Stop()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			writer.Stop(ctx)
 		})
 	}
 }
@@ -187,6 +190,16 @@ func TestWriterOptions(t *testing.T) {
 				return nil
 			},
 		},
+		{
+			name:   "WithWriteBufferSize",
+			option: WithWriteBufferSize(512 * 1024),
+			verify: func(w *Writer) error {
+				if w.writeBufferSize != 512*1024 {
+					return fmt.Errorf("expected writeBufferSize=512KB, got %d", w.writeBufferSize)
+				}
+				return nil
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -195,7 +208,6 @@ func TestWriterOptions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewWriter() error = %v", err)
 			}
-			defer writer.Stop()
 
 			if err := tt.verify(writer); err != nil {
 				t.Error(err)
@@ -220,7 +232,7 @@ func TestWriterBufferFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	writer.Start()
 
@@ -272,7 +284,7 @@ func TestWriterConnectionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	writer.Start()
 
@@ -309,15 +321,8 @@ func TestWriterReconnection(t *testing.T) {
 	}
 	defer os.Remove(socketPath) // Clean up after test
 
-	// Create writer
-	writer, err := NewWriter(socketPath, WithMaxBackoff(100*time.Millisecond))
-	if err != nil {
-		t.Fatalf("NewWriter() error = %v", err)
-	}
-	defer writer.Stop()
-
-	// Add error callback to see what's happening
-	writer, err = NewWriter(socketPath,
+	// Create writer with error callback to see what's happening
+	writer, err := NewWriter(socketPath,
 		WithMaxBackoff(100*time.Millisecond),
 		WithWriterErrorCallback(func(err error, context string) {
 			t.Logf("Writer error: %v (context: %s)", err, context)
@@ -326,7 +331,7 @@ func TestWriterReconnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	writer.Start()
 
@@ -403,8 +408,9 @@ func TestWriterClose(t *testing.T) {
 	writer.Start()
 
 	// Close should be idempotent
-	err1 := writer.Stop()
-	err2 := writer.Stop()
+	ctx := context.Background()
+	err1 := writer.Stop(ctx)
+	err2 := writer.Stop(ctx)
 
 	if err1 != nil {
 		t.Errorf("first Stop() error = %v", err1)
@@ -443,7 +449,7 @@ func TestWriterShutdownRaceConditions(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 
 				start := time.Now()
-				err = writer.Stop()
+				err = writer.Stop(context.Background())
 				elapsed := time.Since(start)
 
 				if elapsed > 500*time.Millisecond {
@@ -488,7 +494,7 @@ func TestWriterShutdownRaceConditions(t *testing.T) {
 				// Close while writes are happening
 				time.Sleep(5 * time.Millisecond)
 				start := time.Now()
-				err = writer.Stop()
+				err = writer.Stop(context.Background())
 				elapsed := time.Since(start)
 
 				<-done // Wait for writes to finish
@@ -539,7 +545,7 @@ func TestWriterShutdownRaceConditions(t *testing.T) {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						errors <- writer.Stop()
+						errors <- writer.Stop(context.Background())
 					}()
 				}
 
@@ -577,7 +583,7 @@ func TestWriterShutdownRaceConditions(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 
 				start := time.Now()
-				err = writer.Stop()
+				err = writer.Stop(context.Background())
 				elapsed := time.Since(start)
 
 				if elapsed > 1*time.Second {
@@ -630,7 +636,7 @@ func TestWriterShutdownRaceConditions(t *testing.T) {
 				}
 
 				start := time.Now()
-				err = writer.Stop()
+				err = writer.Stop(context.Background())
 				elapsed := time.Since(start)
 
 				if elapsed > 1*time.Second {
@@ -645,6 +651,56 @@ func TestWriterShutdownRaceConditions(t *testing.T) {
 				_, _, failed, _ := writer.GetMetrics()
 				if failed == 0 {
 					t.Error("Expected some write failures to be recorded")
+				}
+			},
+		},
+		{
+			name:        "context_timeout",
+			description: "Stop() with context timeout forces shutdown",
+			testFunc: func(t *testing.T) {
+				socketPath, err := LocalPath()
+				if err != nil {
+					t.Fatalf("LocalPath() error = %v", err)
+				}
+				defer os.Remove(socketPath) // Clean up after test
+
+				// Create writer with large buffer to hold messages during shutdown
+				writer, err := NewWriter(socketPath, WithMaxBufferedWrites(1000))
+				if err != nil {
+					t.Fatalf("NewWriter() error = %v", err)
+				}
+
+				writer.Start()
+
+				// Fill the buffer with messages (no listener, so they won't be drained)
+				for i := 0; i < 100; i++ {
+					writer.WriteMessage([]byte("test message that won't be sent"))
+				}
+
+				// Give some time for connection attempts
+				time.Sleep(50 * time.Millisecond)
+
+				// Use a very short context timeout to force shutdown
+				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+				defer cancel()
+
+				// Wait for context to expire before calling Stop
+				<-ctx.Done()
+
+				start := time.Now()
+				err = writer.Stop(ctx)
+				elapsed := time.Since(start)
+
+				// Should complete quickly due to timeout
+				if elapsed > 100*time.Millisecond {
+					t.Errorf("Writer.Stop() with timeout took too long: %v (expected < 100ms)", elapsed)
+				}
+
+				// Should return a context timeout error
+				if err == nil {
+					t.Error("Expected context timeout error, but got nil")
+				} else if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("Expected context deadline exceeded error, got: %v", err)
 				}
 			},
 		},
@@ -712,7 +768,7 @@ func TestWriterWriteFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	writer.Start()
 
@@ -809,6 +865,97 @@ func (m *mockConnection) RemoteAddr() net.Addr            { return nil }
 func (m *mockConnection) SetDeadline(time.Time) error     { return nil }
 func (m *mockConnection) SetReadDeadline(time.Time) error { return nil }
 
+func TestWriterGracefulShutdown(t *testing.T) {
+	t.Parallel()
+	
+	tests := []struct {
+		name           string
+		setupCtx       func() (context.Context, context.CancelFunc)
+		expectClean    bool
+		waitForContext bool
+		description    string
+	}{
+		{
+			name: "clean_shutdown_with_sufficient_timeout",
+			setupCtx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 2*time.Second)
+			},
+			expectClean: true,
+			description: "Should drain all messages within timeout",
+		},
+		{
+			name: "forced_shutdown_with_short_timeout",
+			setupCtx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 1*time.Millisecond)
+			},
+			waitForContext: true,
+			description:    "Should force shutdown when context expires",
+		},
+		{
+			name: "cancelled_context",
+			setupCtx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			description: "Should force shutdown when context is cancelled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			socketPath, err := LocalPath()
+			if err != nil {
+				t.Fatalf("LocalPath() error = %v", err)
+			}
+			defer os.Remove(socketPath)
+
+			writer, err := NewWriter(socketPath, WithMaxBufferedWrites(100))
+			if err != nil {
+				t.Fatalf("NewWriter() error = %v", err)
+			}
+
+			writer.Start()
+
+			// Fill buffer with some messages
+			for i := 0; i < 50; i++ {
+				writer.WriteMessage([]byte(fmt.Sprintf("message %d", i)))
+			}
+
+			ctx, cancel := tt.setupCtx()
+			defer cancel()
+
+			// For cancelled context test, cancel immediately before calling Stop
+			if tt.name == "cancelled_context" {
+				cancel()
+			}
+
+			// Wait for context to expire if requested
+			if tt.waitForContext {
+				<-ctx.Done()
+			}
+
+			start := time.Now()
+			err = writer.Stop(ctx)
+			elapsed := time.Since(start)
+
+			t.Logf("%s: elapsed=%v, error=%v", tt.description, elapsed, err)
+
+			if tt.expectClean {
+				if err != nil {
+					t.Errorf("Expected clean shutdown but got error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Errorf("Expected forced shutdown error but got nil")
+				}
+				if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+					t.Errorf("Expected context error, got: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestWriterEmptyMessageFiltering(t *testing.T) {
 	t.Parallel()
 	socketPath, err := LocalPath()
@@ -821,7 +968,7 @@ func TestWriterEmptyMessageFiltering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWriter() error = %v", err)
 	}
-	defer writer.Stop()
+	defer writer.Stop(context.Background())
 
 	writer.Start()
 
@@ -854,4 +1001,146 @@ func TestWriterEmptyMessageFiltering(t *testing.T) {
 	}
 
 	t.Logf("Empty message filtering: sent=%d, dropped=%d, failed=%d, queueDepth=%d", sent, dropped, failed, queueDepth)
+}
+
+// mockTimeoutError simulates a network timeout error
+type mockTimeoutError struct {
+	message string
+}
+
+func (e mockTimeoutError) Error() string   { return e.message }
+func (e mockTimeoutError) Timeout() bool   { return true }
+func (e mockTimeoutError) Temporary() bool { return false }
+
+// mockNetError simulates a non-timeout network error
+type mockNetError struct {
+	message string
+}
+
+func (e mockNetError) Error() string   { return e.message }
+func (e mockNetError) Timeout() bool   { return false }
+func (e mockNetError) Temporary() bool { return false }
+
+func TestWriterClassifyWriteError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		inputError    error
+		expectError   error
+		expectTimeout bool
+	}{
+		{
+			name:          "timeout_error",
+			inputError:    mockTimeoutError{message: "timeout occurred"},
+			expectError:   ErrBackpressure,
+			expectTimeout: true,
+		},
+		{
+			name:        "non_timeout_net_error",
+			inputError:  mockNetError{message: "connection refused"},
+			expectError: ErrNoConsumer,
+		},
+		{
+			name:        "regular_error",
+			inputError:  fmt.Errorf("regular error"),
+			expectError: ErrNoConsumer,
+		},
+		{
+			name:        "wrapped_timeout_error",
+			inputError:  fmt.Errorf("context: %w", mockTimeoutError{message: "deadline exceeded"}),
+			expectError: ErrBackpressure,
+			expectTimeout: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			writer := &Writer{}
+			result := writer.classifyWriteError(tt.inputError)
+
+			if !errors.Is(result, tt.expectError) {
+				t.Errorf("expected error type %v, got %v", tt.expectError, result)
+			}
+
+			// For timeout errors, also verify the original error is preserved
+			if tt.expectTimeout {
+				if !errors.Is(result, tt.inputError) {
+					t.Errorf("expected original timeout error to be preserved in result")
+				}
+			}
+		})
+	}
+}
+
+func TestWriterDrainErrorHandling(t *testing.T) {
+	t.Parallel()
+
+	socketPath, err := LocalPath()
+	if err != nil {
+		t.Fatalf("LocalPath() error = %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	var drainErrors []string
+	var errorMu sync.Mutex
+
+	errorCallback := func(err error, context string) {
+		errorMu.Lock()
+		drainErrors = append(drainErrors, context)
+		errorMu.Unlock()
+	}
+
+	writer, err := NewWriter(
+		socketPath,
+		WithMaxBufferedWrites(100),
+		WithWriterErrorCallback(errorCallback),
+	)
+	if err != nil {
+		t.Fatalf("NewWriter() error = %v", err)
+	}
+
+	writer.Start()
+
+	// Fill buffer with messages (no listener, so they won't be sent)
+	for i := 0; i < 10; i++ {
+		writer.WriteMessage([]byte(fmt.Sprintf("message %d", i)))
+	}
+
+	// Wait a bit for messages to be queued
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop with a context that will force shutdown, triggering drain
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err = writer.Stop(ctx)
+
+	// Should either succeed gracefully or timeout
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("unexpected error during stop: %v", err)
+	}
+
+	// Check that drain attempted to process messages
+	_, _, failed, _ := writer.GetMetrics()
+	if failed == 0 {
+		t.Error("expected some write failures during drain when no listener present")
+	}
+
+	// Verify error callbacks were triggered during drain
+	errorMu.Lock()
+	hasDrainError := false
+	for _, context := range drainErrors {
+		if strings.Contains(context, "write failure during drain") || strings.Contains(context, "write failure") {
+			hasDrainError = true
+			break
+		}
+	}
+	errorMu.Unlock()
+
+	if !hasDrainError {
+		t.Error("expected write failure callbacks during drain")
+	}
 }
