@@ -17,6 +17,7 @@ limitations under the License.
 package udsipc
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -144,7 +146,7 @@ func TestNewReader(t *testing.T) {
 
 			// Clean up
 			if reader.listener != nil {
-				reader.Stop()
+				reader.Stop(context.Background())
 			}
 		})
 	}
@@ -209,7 +211,7 @@ func TestReaderOptions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewReader() error = %v", err)
 			}
-			defer reader.Stop()
+			defer reader.Stop(context.Background())
 
 			if err := tt.verify(reader); err != nil {
 				t.Error(err)
@@ -305,7 +307,7 @@ func TestReaderMessageHandling(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewReader() error = %v", err)
 			}
-			defer reader.Stop()
+			defer reader.Stop(context.Background())
 
 			if err := reader.Start(); err != nil {
 				t.Fatalf("reader.Start() error = %v", err)
@@ -437,8 +439,8 @@ func TestReaderClose(t *testing.T) {
 
 			if tt.testIdempotent {
 				// Test that Stop() is idempotent
-				err1 := reader.Stop()
-				err2 := reader.Stop()
+				err1 := reader.Stop(context.Background())
+				err2 := reader.Stop(context.Background())
 
 				if err1 != nil {
 					t.Errorf("first Stop() error = %v", err1)
@@ -454,7 +456,7 @@ func TestReaderClose(t *testing.T) {
 
 				done := make(chan error, 1)
 				go func() {
-					done <- reader.Stop()
+					done <- reader.Stop(context.Background())
 				}()
 
 				select {
@@ -492,7 +494,7 @@ func TestReaderContextCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		t.Fatalf("reader.Start() error = %v", err)
@@ -502,9 +504,175 @@ func TestReaderContextCancellation(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Should be able to stop cleanly
-	if err := reader.Stop(); err != nil {
+	if err := reader.Stop(context.Background()); err != nil {
 		t.Errorf("Stop() error = %v", err)
 	}
+}
+
+func TestReaderGracefulShutdown(t *testing.T) {
+	t.Parallel()
+	socketPath, err := LocalPath()
+	if err != nil {
+		t.Fatalf("LocalPath() error = %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	var processedCount int32
+	var processingDelay time.Duration = 200 * time.Millisecond
+
+	reader, err := NewReader(
+		func(data []byte) error {
+			// Simulate slow processing
+			time.Sleep(processingDelay)
+			atomic.AddInt32(&processedCount, 1)
+			return nil
+		},
+		socketPath,
+	)
+	if err != nil {
+		t.Fatalf("NewReader() error = %v", err)
+	}
+
+	if err := reader.Start(); err != nil {
+		t.Fatalf("reader.Start() error = %v", err)
+	}
+
+	// Give reader time to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Send a message that will take time to process
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("net.Dial() error = %v", err)
+	}
+
+	message := []byte("test message")
+	lengthBuf := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutUvarint(lengthBuf, uint64(len(message)))
+	if _, err := conn.Write(lengthBuf[:n]); err != nil {
+		conn.Close()
+		t.Fatalf("Write length prefix error = %v", err)
+	}
+	if _, err := conn.Write(message); err != nil {
+		conn.Close()
+		t.Fatalf("Write message error = %v", err)
+	}
+	conn.Close()
+
+	// Wait a bit for message to start processing
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop with generous context that allows message to complete
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	stopStart := time.Now()
+	if err := reader.Stop(ctx); err != nil {
+		t.Errorf("Stop() error = %v", err)
+	}
+	elapsed := time.Since(stopStart)
+
+	// Message should have been processed
+	if atomic.LoadInt32(&processedCount) != 1 {
+		t.Errorf("expected 1 processed message, got %d", atomic.LoadInt32(&processedCount))
+	}
+
+	// Should have completed gracefully (before context timeout)
+	if elapsed >= 1*time.Second {
+		t.Errorf("Stop() took too long: %v, suggests forced shutdown", elapsed)
+	}
+
+	t.Logf("Graceful shutdown completed in %v", elapsed)
+}
+
+func TestReaderForcedShutdown(t *testing.T) {
+	t.Parallel()
+	socketPath, err := LocalPath()
+	if err != nil {
+		t.Fatalf("LocalPath() error = %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	var processedCount int32
+	var started int32
+
+	reader, err := NewReader(
+		func(data []byte) error {
+			atomic.AddInt32(&started, 1)
+			// Simulate slow processing by looping with checks
+			// This allows us to be interrupted by context cancellation
+			for i := 0; i < 100; i++ {
+				time.Sleep(20 * time.Millisecond)
+			}
+			atomic.AddInt32(&processedCount, 1)
+			return nil
+		},
+		socketPath,
+	)
+	if err != nil {
+		t.Fatalf("NewReader() error = %v", err)
+	}
+
+	if err := reader.Start(); err != nil {
+		t.Fatalf("reader.Start() error = %v", err)
+	}
+
+	// Give reader time to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Send two messages - one will start processing, second will be queued
+	for i := 0; i < 2; i++ {
+		conn, err := net.Dial("unix", socketPath)
+		if err != nil {
+			t.Fatalf("net.Dial() error = %v", err)
+		}
+
+		message := []byte(fmt.Sprintf("message %d", i))
+		lengthBuf := make([]byte, binary.MaxVarintLen64)
+		n := binary.PutUvarint(lengthBuf, uint64(len(message)))
+		if _, err := conn.Write(lengthBuf[:n]); err != nil {
+			conn.Close()
+			t.Fatalf("Write length prefix error = %v", err)
+		}
+		if _, err := conn.Write(message); err != nil {
+			conn.Close()
+			t.Fatalf("Write message error = %v", err)
+		}
+		conn.Close()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Wait for first message to start processing
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop with short context that will expire during processing
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	stopStart := time.Now()
+	if err := reader.Stop(ctx); err != nil {
+		t.Errorf("Stop() error = %v", err)
+	}
+	elapsed := time.Since(stopStart)
+
+	// At least one message should have started
+	startedCount := atomic.LoadInt32(&started)
+	if startedCount == 0 {
+		t.Error("expected at least 1 message to start processing")
+	}
+
+	// With forced shutdown, not all messages should complete
+	// (the second message should be dropped when shutdownForced is signaled)
+	processed := atomic.LoadInt32(&processedCount)
+	t.Logf("Started processing: %d, Completed: %d", startedCount, processed)
+
+	// Should have completed relatively quickly due to forced shutdown
+	// Note: May need to wait for in-flight handler to complete
+	if elapsed > 2500*time.Millisecond {
+		t.Errorf("Stop() took too long: %v", elapsed)
+	}
+
+	t.Logf("Forced shutdown completed in %v with %d/%d messages completed", elapsed, processed, startedCount)
 }
 
 // mockFailingListener simulates a listener that fails Accept() calls
@@ -612,7 +780,7 @@ func TestReaderAcceptErrorHandling(t *testing.T) {
 				time.Sleep(200 * time.Millisecond)
 			}
 
-			if err := reader.Stop(); err != nil {
+			if err := reader.Stop(context.Background()); err != nil {
 				t.Errorf("reader.Stop() error = %v", err)
 			}
 

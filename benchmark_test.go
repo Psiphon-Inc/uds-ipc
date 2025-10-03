@@ -79,7 +79,7 @@ func benchmarkReaderWriter(b *testing.B, messageSize int, bufferSize uint32) {
 	if err != nil {
 		b.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	writer, err := NewWriter(
 		socketPath,
@@ -176,7 +176,7 @@ func benchmarkHandlerLatency(b *testing.B, handlerDelay time.Duration, messageSi
 	if err != nil {
 		b.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	// Use appropriate buffer size for handler latency test
 	bufferSize := uint32(numOps + 100)
@@ -233,7 +233,7 @@ func BenchmarkMemoryAllocation(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	// Use buffer size that can handle b.N messages
 	bufferSize := uint32(max(10000, b.N+100))
@@ -306,7 +306,7 @@ func benchmarkProtocolOverhead(b *testing.B, messageSize int) {
 	if err != nil {
 		b.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	// Use appropriate buffer size
 	bufferSize := uint32(max(1000, b.N+100))
