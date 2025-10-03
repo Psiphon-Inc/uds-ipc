@@ -71,9 +71,13 @@ func main() {
     // Give reader time to start.
     time.Sleep(100 * time.Millisecond)
     
-    // Send messages.
-    writer.WriteMessage([]byte("Hello, UDS!"))
-    writer.WriteMessage([]byte("Another message"))
+    // Send messages (returns error if queue is full).
+    if err := writer.WriteMessage([]byte("Hello, UDS!")); err != nil {
+        log.Printf("Failed to queue message: %v", err)
+    }
+    if err := writer.WriteMessage([]byte("Another message")); err != nil {
+        log.Printf("Failed to queue message: %v", err)
+    }
     
     // Allow time for processing.
     time.Sleep(100 * time.Millisecond)
@@ -184,6 +188,14 @@ reader.Stop()   // Safe to call multiple times
 ### Error Handling
 
 ```go
+// Handle WriteMessage errors when queue is full
+if err := writer.WriteMessage(data); err != nil {
+    if errors.Is(err, udsipc.ErrBufferFull) {
+        log.Printf("Message dropped: queue is full")
+        // Consider implementing retry logic or backoff
+    }
+}
+
 // Monitor metrics for health checking
 sent, dropped, failed, queueDepth := writer.GetMetrics()
 if dropped > 0 {
@@ -191,7 +203,7 @@ if dropped > 0 {
 }
 
 // Use error callbacks for monitoring
-writer, err := udsipc.NewWriter(socketPath, 
+writer, err := udsipc.NewWriter(socketPath,
     udsipc.WithWriterErrorCallback(func(err error, context string) {
         log.Printf("Writer error in %s: %v", context, err)
     }),

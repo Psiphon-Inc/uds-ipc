@@ -1003,6 +1003,139 @@ func TestWriterEmptyMessageFiltering(t *testing.T) {
 	t.Logf("Empty message filtering: sent=%d, dropped=%d, failed=%d, queueDepth=%d", sent, dropped, failed, queueDepth)
 }
 
+func TestWriterMessageQueueFull(t *testing.T) {
+	t.Parallel()
+	socketPath, err := LocalPath()
+	if err != nil {
+		t.Fatalf("LocalPath() error = %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	// Create writer with very small buffer
+	writer, err := NewWriter(socketPath, WithMaxBufferedWrites(2))
+	if err != nil {
+		t.Fatalf("NewWriter() error = %v", err)
+	}
+
+	// Use short timeout for Stop since writer never starts
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	defer writer.Stop(ctx)
+
+	// Don't start the writer - this prevents messages from being drained
+	// so the buffer fills up quickly
+
+	// Fill the buffer
+	err1 := writer.WriteMessage([]byte("message1"))
+	if err1 != nil {
+		t.Errorf("First WriteMessage should succeed, got error: %v", err1)
+	}
+
+	err2 := writer.WriteMessage([]byte("message2"))
+	if err2 != nil {
+		t.Errorf("Second WriteMessage should succeed, got error: %v", err2)
+	}
+
+	// This should fail with ErrBufferFull
+	err3 := writer.WriteMessage([]byte("message3"))
+	if err3 == nil {
+		t.Error("Expected WriteMessage to return error when buffer full, got nil")
+	}
+	if !errors.Is(err3, ErrBufferFull) {
+		t.Errorf("Expected ErrBufferFull, got: %v", err3)
+	}
+
+	// Verify metrics show the dropped message
+	sent, dropped, failed, queueDepth := writer.GetMetrics()
+	if dropped != 1 {
+		t.Errorf("Expected dropped count = 1, got %d", dropped)
+	}
+	if sent != 0 {
+		t.Errorf("Expected sent count = 0 (writer not started), got %d", sent)
+	}
+	if queueDepth != 2 {
+		t.Errorf("Expected queue depth = 2, got %d", queueDepth)
+	}
+	if failed != 0 {
+		t.Errorf("Expected failed count = 0, got %d", failed)
+	}
+}
+
+func TestWriterMessageQueueFullWithRetry(t *testing.T) {
+	t.Parallel()
+	socketPath, err := LocalPath()
+	if err != nil {
+		t.Fatalf("LocalPath() error = %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	var receivedCount int32
+
+	// Create reader to drain messages
+	reader, err := NewReader(
+		func(data []byte) error {
+			atomic.AddInt32(&receivedCount, 1)
+			time.Sleep(50 * time.Millisecond) // Slow processing
+			return nil
+		},
+		socketPath,
+	)
+	if err != nil {
+		t.Fatalf("NewReader() error = %v", err)
+	}
+	defer reader.Stop(context.Background())
+
+	if err := reader.Start(); err != nil {
+		t.Fatalf("reader.Start() error = %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Create writer with small buffer
+	writer, err := NewWriter(socketPath, WithMaxBufferedWrites(5))
+	if err != nil {
+		t.Fatalf("NewWriter() error = %v", err)
+	}
+	defer writer.Stop(context.Background())
+
+	writer.Start()
+
+	// Try to send many messages quickly to fill buffer
+	successCount := 0
+	errorCount := 0
+	for i := 0; i < 20; i++ {
+		err := writer.WriteMessage([]byte(fmt.Sprintf("message %d", i)))
+		if err != nil {
+			if errors.Is(err, ErrBufferFull) {
+				errorCount++
+				// Retry after a brief delay
+				time.Sleep(10 * time.Millisecond)
+				if retryErr := writer.WriteMessage([]byte(fmt.Sprintf("message %d", i))); retryErr == nil {
+					successCount++
+				}
+			}
+		} else {
+			successCount++
+		}
+	}
+
+	// Wait for messages to be processed
+	time.Sleep(2 * time.Second)
+
+	t.Logf("Successfully sent: %d, Encountered backpressure: %d, Final received: %d",
+		successCount, errorCount, atomic.LoadInt32(&receivedCount))
+
+	// We should have encountered some backpressure
+	if errorCount == 0 {
+		t.Error("Expected to encounter backpressure (ErrBufferFull), but didn't")
+	}
+
+	// Most messages should eventually succeed
+	if successCount < 15 {
+		t.Errorf("Expected at least 15 successful sends (with retries), got %d", successCount)
+	}
+}
+
 // mockTimeoutError simulates a network timeout error
 type mockTimeoutError struct {
 	message string
