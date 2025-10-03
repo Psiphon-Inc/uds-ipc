@@ -18,6 +18,7 @@ package udsipc
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -77,7 +78,8 @@ type Reader struct {
 	systemd           *SystemdManager
 	listener          net.Listener
 	socketPath        string
-	done              chan struct{}
+	shutdownStart     chan struct{} // Signals running→stopping transition.
+	shutdownForced    chan struct{} // Signals stopping→stopped forcefully.
 	maxMessageSize    uint64
 	receivedCount     uint64 // Successfully processed messages.
 	connectionCount   uint64 // Total connections accepted.
@@ -107,7 +109,8 @@ func NewReader(handler MessageHandler, fallbackSocketPath string, opts ...Reader
 		inactivityTimeout: 10 * time.Second,
 		maxAcceptErrors:   10,
 		readBufferSize:    256 << 10, // 256KB.
-		done:              make(chan struct{}),
+		shutdownStart:     make(chan struct{}),
+		shutdownForced:    make(chan struct{}),
 	}
 
 	for _, opt := range opts {
@@ -203,18 +206,19 @@ func (r *Reader) Start() error {
 	return nil
 }
 
-// Stop shuts down the reader gracefully. Subsequent calls return nil.
-func (r *Reader) Stop() error {
+// Stop shuts down the reader gracefully, allowing in-flight messages to complete
+// until the provided context is cancelled or expires. Subsequent calls return nil.
+func (r *Reader) Stop(ctx context.Context) error {
 	var err error
 
 	r.closeOnce.Do(func() {
-		close(r.done)
+		close(r.shutdownStart)
 
 		// Unix domain socket Accept() doesn't seem to respect SetDeadline.
 		// Force the blocked Accept() to return by connecting to ourselves.
 		if r.listener != nil {
 			go func() {
-				//nolint: mnd // Brief delay to ensure r.done channel is processed first.
+				//nolint: mnd // Brief delay to ensure r.shutdownStart channel is processed first.
 				time.Sleep(10 * time.Millisecond)
 				if conn, dialErr := net.Dial("unix", r.socketPath); dialErr == nil { // nolint: noctx
 					_ = conn.Close()
@@ -222,10 +226,25 @@ func (r *Reader) Stop() error {
 			}()
 		}
 
+		// Monitor context and abort drain if context is cancelled or expires.
+		stopComplete := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				// Context cancelled or expired - force immediate shutdown.
+				close(r.shutdownForced)
+			case <-stopComplete:
+				// Clean shutdown completed before context cancellation/expiration.
+			}
+		}()
+
 		// Wait for all goroutines to finish before closing the listener.
 		// This prevents a race condition where SetDeadline() is called
 		// on an invalid file descriptor (as warned in os.File.Fd docs).
 		r.wg.Wait()
+
+		// Signal context monitor that we're done.
+		close(stopComplete)
 
 		if r.systemd.IsSystemd() {
 			// r.systemd.Close will close the listener internally.
@@ -257,7 +276,7 @@ func (r *Reader) run() {
 		conn, err := r.listener.Accept()
 		if err != nil {
 			select {
-			case <-r.done:
+			case <-r.shutdownStart:
 				return
 			default:
 				consecutiveErrors++
@@ -282,7 +301,7 @@ func (r *Reader) run() {
 
 		// Check for shutdown after successful accept as well.
 		select {
-		case <-r.done:
+		case <-r.shutdownStart:
 			_ = conn.Close()
 			return
 		default:
@@ -313,7 +332,17 @@ func (r *Reader) handleConnection(conn net.Conn) {
 
 	for {
 		select {
-		case <-r.done:
+		case <-r.shutdownStart:
+			// Graceful shutdown initiated - continue draining current connection.
+		case <-r.shutdownForced:
+			// Forced shutdown - exit immediately without processing further messages.
+			// IMPORTANT: This cannot interrupt an already-executing handler. If the handler
+			// is blocking (e.g., in time.Sleep or blocking I/O), this goroutine will wait
+			// for it to complete before returning. An open connection that continues to
+			// write messages while the handler is blocked will cause this goroutine to
+			// remain blocked indefinitely until the handler completes or the connection
+			// closes. To prevent this, ensure handlers are responsive and don't block
+			// indefinitely, or ensure clients close connections promptly on shutdown.
 			return
 		default:
 		}

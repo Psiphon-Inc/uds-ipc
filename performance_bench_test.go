@@ -42,7 +42,7 @@ func BenchmarkBasicThroughput(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	writer, err := NewWriter(socketPath, WithMaxBufferedWrites(uint32(b.N+100)))
 	if err != nil {
@@ -110,7 +110,7 @@ func BenchmarkMessageSizes(b *testing.B) {
 			if err != nil {
 				b.Fatalf("NewReader() error = %v", err)
 			}
-			defer reader.Stop()
+			defer reader.Stop(context.Background())
 
 			writer, err := NewWriter(socketPath, WithMaxBufferedWrites(uint32(b.N+100)))
 			if err != nil {
@@ -184,7 +184,7 @@ func BenchmarkBufferOptimization(b *testing.B) {
 			if err != nil {
 				b.Fatalf("NewReader() error = %v", err)
 			}
-			defer reader.Stop()
+			defer reader.Stop(context.Background())
 
 			writerOpts := []WriterOption{WithMaxBufferedWrites(uint32(b.N + 100))}
 			if config.buffer > 0 {
@@ -257,7 +257,7 @@ func BenchmarkMultipleWriters(b *testing.B) {
 			if err != nil {
 				b.Fatalf("NewReader() error = %v", err)
 			}
-			defer reader.Stop()
+			defer reader.Stop(context.Background())
 
 			// Create multiple writers
 			writers := make([]*Writer, writerCount)
@@ -321,7 +321,7 @@ func BenchmarkWriteOnly(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	writer, err := NewWriter(socketPath, WithMaxBufferedWrites(uint32(b.N+1000)))
 	if err != nil {
@@ -380,7 +380,7 @@ func BenchmarkReadOnly(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	writer, err := NewWriter(socketPath, WithMaxBufferedWrites(uint32(b.N+100)))
 	if err != nil {

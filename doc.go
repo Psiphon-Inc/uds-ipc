@@ -45,7 +45,7 @@ limitations under the License.
 //	if err := reader.Start(); err != nil {
 //		log.Fatal(err)
 //	}
-//	defer reader.Stop()
+//	defer reader.Stop(context.Background())
 //
 // Create a writer to send messages using functional options:
 //
@@ -62,7 +62,7 @@ limitations under the License.
 //	}
 //
 //	writer.Start()
-//	defer writer.Stop()
+//	defer writer.Stop(context.Background())
 //
 //	// Send messages (non-blocking)
 //	writer.WriteMessage([]byte("hello world"))
@@ -72,9 +72,30 @@ limitations under the License.
 // Both Reader and Writer use a simple Start()/Stop() lifecycle pattern:
 //
 //   - Start() begins operation (non-blocking for Writer, may return error for Reader)
-//   - Stop() gracefully shuts down and waits for cleanup
+//   - Stop(ctx) gracefully shuts down and waits for cleanup or context cancellation/expiration
 //   - Both methods are idempotent and safe to call multiple times
-//   - No context management required - the library handles internal coordination
+//   - Context controls shutdown timeout - graceful drain until context is cancelled/expires, then forced
+//
+// # Graceful Shutdown
+//
+// Both Reader and Writer support context-controlled graceful shutdown:
+//
+//   - Reader.Stop(ctx): Stops accepting new connections and allows in-flight message
+//     handlers to complete until the context is cancelled or expires. When the context
+//     is done, forces immediate termination (though already-executing handlers will complete).
+//
+//   - Writer.Stop(ctx): Stops accepting new writes and drains buffered messages
+//     until the context is cancelled or expires. When the context is done, discards
+//     remaining buffered messages and terminates immediately.
+//
+// For immediate shutdown, use a short timeout or cancellation:
+//
+//	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+//	defer cancel()
+//	reader.Stop(ctx)
+//	writer.Stop(ctx)
+//
+// # For indefinite graceful drain, use context.Background() or a long timeout
 //
 // # Functional Options
 //

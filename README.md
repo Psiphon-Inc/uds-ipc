@@ -13,7 +13,7 @@ A Go library for inter-process communication using Unix Domain Sockets with leng
 - **Automatic reconnection**: Built-in connection recovery with exponential backoff and write retry
 - **Performance optimized**: Vectored I/O, buffer pooling, and socket buffer tuning
 - **Systemd integration**: Automatic socket activation support
-- **Graceful shutdown**: Clean resource cleanup and connection termination
+- **Graceful shutdown**: Context-controlled shutdown with timeout support for clean draining
 - **Internal metrics**: Message counts, error tracking, and queue depth monitoring
 - **Zero external dependencies**: Uses only Go standard library
 - **Tested**: Comprehensive test suite with race detection and benchmarks
@@ -32,10 +32,11 @@ go get github.com/Psiphon-Inc/uds-ipc
 package main
 
 import (
+    "context"
     "fmt"
     "log"
     "time"
-    
+
     "github.com/Psiphon-Inc/uds-ipc"
 )
 
@@ -53,14 +54,14 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    defer reader.Stop()
-    
+    defer reader.Stop(context.Background())
+
     // Create writer (client).
     writer, err := udsipc.NewWriter(socketPath)
     if err != nil {
         log.Fatal(err)
     }
-    defer writer.Stop()
+    defer writer.Stop(context.Background())
     
     // Start components.
     if err := reader.Start(); err != nil {
@@ -172,13 +173,19 @@ Messages use varint length prefixes for efficient parsing:
 ### Resource Management
 
 ```go
-// Always defer Stop() calls
-defer reader.Stop()
-defer writer.Stop()
+// Always defer Stop() calls with appropriate context
+defer reader.Stop(context.Background())
+defer writer.Stop(context.Background())
 
 // Start() and Stop() are idempotent and safe to call multiple times
 reader.Start()  // Safe to call multiple times
-reader.Stop()   // Safe to call multiple times
+reader.Stop(context.Background())   // Safe to call multiple times
+
+// For controlled shutdown with timeout
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+reader.Stop(ctx)  // Gracefully drain for up to 5 seconds, then force shutdown
+writer.Stop(ctx)  // Drain buffered messages for up to 5 seconds, then discard remaining
 ```
 
 ### Error Handling

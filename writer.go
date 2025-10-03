@@ -151,7 +151,7 @@ func (w *Writer) Start() {
 }
 
 // Stop attempts to shut down gracefully until it either finishes
-// draining all writes, or the passed context is cancelled.
+// draining all writes, or the passed context is cancelled or expires.
 // Subsequent calls return nil.
 func (w *Writer) Stop(ctx context.Context) error {
 	var err error
@@ -159,10 +159,10 @@ func (w *Writer) Stop(ctx context.Context) error {
 	w.closeOnce.Do(func() {
 		close(w.shutdownStart) // Signal run() to begin shutdown
 
-		// Wait for either graceful completion or context timeout
+		// Wait for either graceful completion or context cancellation/expiration
 		select {
 		case <-w.shutdownComplete: // Clean shutdown - all buffered messages drained
-		case <-ctx.Done(): // Forced shutdown - context expired/cancelled
+		case <-ctx.Done(): // Forced shutdown - context cancelled or expired
 			close(w.shutdownForced) // Force run() to exit drain phase immediately
 			err = fmt.Errorf("graceful shutdown timeout, forcing unclean shutdown: %w", ctx.Err())
 		}

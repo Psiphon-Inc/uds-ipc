@@ -132,7 +132,7 @@ func TestReaderWriterIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewReader() error = %v", err)
 			}
-			defer reader.Stop()
+			defer reader.Stop(context.Background())
 
 			// Set up writer
 			writerOpts := append(tt.writerOptions, WithWriterErrorCallback(writerErrorCallback))
@@ -259,7 +259,7 @@ func TestReaderWriterConnectionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	writer, err := NewWriter(socketPath, WithMaxBackoff(100*time.Millisecond))
 	if err != nil {
@@ -290,7 +290,7 @@ func TestReaderWriterConnectionRecovery(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Restart reader (simulate reader crash/restart)
-	reader.Stop()
+	reader.Stop(context.Background())
 	time.Sleep(100 * time.Millisecond)
 
 	reader2, err := NewReader(
@@ -305,7 +305,7 @@ func TestReaderWriterConnectionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader2.Stop()
+	defer reader2.Stop(context.Background())
 
 	if err := reader2.Start(); err != nil {
 		t.Fatalf("reader2.Start() error = %v", err)
@@ -357,7 +357,7 @@ func TestReaderWriterConcurrentSenders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	if err := reader.Start(); err != nil {
 		t.Fatalf("reader.Start() error = %v", err)
@@ -474,7 +474,7 @@ func TestReaderWriterHandlerError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader() error = %v", err)
 	}
-	defer reader.Stop()
+	defer reader.Stop(context.Background())
 
 	writer, err := NewWriter(socketPath)
 	if err != nil {
