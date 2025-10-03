@@ -330,10 +330,12 @@ func (r *Reader) handleConnection(conn net.Conn) {
 	reader.Reset(conn)
 	defer bufioReaderPool.Put(reader)
 
+	draining := false
+
 	for {
 		select {
 		case <-r.shutdownStart:
-			// Graceful shutdown initiated - continue draining current connection.
+			draining = true
 		case <-r.shutdownForced:
 			// Forced shutdown - exit immediately without processing further messages.
 			// IMPORTANT: This cannot interrupt an already-executing handler. If the handler
@@ -347,9 +349,15 @@ func (r *Reader) handleConnection(conn net.Conn) {
 		default:
 		}
 
-		// Set inactivity timeout to close idle connections.
+		// Set read deadline based on shutdown state.
 		// Potential errors are ignored because there is nothing to do with them.
-		_ = conn.SetReadDeadline(time.Now().Add(r.inactivityTimeout))
+		deadline := time.Now()
+		if !draining {
+			// Normal operation - set inactivity timeout to close idle connections.
+			deadline = deadline.Add(r.inactivityTimeout)
+		}
+
+		_ = conn.SetReadDeadline(deadline)
 
 		length, err := binary.ReadUvarint(reader)
 		if err != nil {
