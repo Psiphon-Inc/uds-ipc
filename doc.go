@@ -64,8 +64,10 @@ limitations under the License.
 //	writer.Start()
 //	defer writer.Stop(context.Background())
 //
-//	// Send messages (non-blocking)
-//	writer.WriteMessage([]byte("hello world"))
+//	// Send messages (non-blocking, returns error if queue is full)
+//	if err := writer.WriteMessage([]byte("hello world")); err != nil {
+//		log.Printf("Failed to queue message: %v", err)
+//	}
 //
 // # API Design
 //

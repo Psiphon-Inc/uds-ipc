@@ -116,10 +116,11 @@ func NewWriter(socketPath string, opts ...WriterOption) (*Writer, error) {
 	return w, nil
 }
 
-// WriteMessage queues a message for sending, dropping messages when the queue is full (instead of blocking).
-func (w *Writer) WriteMessage(data []byte) {
+// WriteMessage queues a message for sending, dropping messages and returning
+// ErrBufferFull when the queue is full (instead of blocking).
+func (w *Writer) WriteMessage(data []byte) error {
 	if len(data) < 1 {
-		return
+		return nil
 	}
 
 	select {
@@ -128,7 +129,10 @@ func (w *Writer) WriteMessage(data []byte) {
 	default:
 		// Queue full - message dropped.
 		atomic.AddUint64(&w.droppedCount, 1)
+		return ErrBufferFull
 	}
+
+	return nil
 }
 
 // GetMetrics returns current counter values and queue depth.
