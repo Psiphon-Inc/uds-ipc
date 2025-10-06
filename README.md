@@ -115,7 +115,7 @@ writer, err := udsipc.NewWriter(
 - **Message buffer pooling**: Reuses 4KB buffers to eliminate allocations for small messages
 - **BufIO reader pooling**: Reuses buffered readers across connections
 - **Vectored I/O buffer pooling**: Reuses net.Buffers slices for write operations
-- **Write retry logic**: Single retry on write failure to avoid full reconnect cycles
+- **Write retry logic**: Failed writes are buffered and retried on reconnect, blocking new writes until successful
 - **Socket buffer tuning**: Configurable kernel buffers to optimize network performance
 
 ### Benchmark Results
