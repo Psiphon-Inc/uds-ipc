@@ -155,10 +155,10 @@ func TestCleanupSocketErrorHandling(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		setup      func() string // Returns path to test
-		cleanup    func(string)  // Cleanup after test
-		wantErr    bool
+		name    string
+		setup   func() string // Returns path to test
+		cleanup func(string)  // Cleanup after test
+		wantErr bool
 	}{
 		{
 			name: "file_exists",

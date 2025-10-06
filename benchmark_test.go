@@ -131,8 +131,8 @@ func BenchmarkHandlerLatency(b *testing.B) {
 		messageSize  int
 		maxOps       int // Limit operations for delay benchmarks to prevent timeouts
 	}{
-		{"NoDelay_1KB", 0, 1024, 0}, // 0 means no limit, use b.N
-		{"10us_1KB", 10 * time.Microsecond, 1024, 10000}, // Limit to 10k ops (100ms)
+		{"NoDelay_1KB", 0, 1024, 0},                       // 0 means no limit, use b.N
+		{"10us_1KB", 10 * time.Microsecond, 1024, 10000},  // Limit to 10k ops (100ms)
 		{"100us_1KB", 100 * time.Microsecond, 1024, 1000}, // Limit to 1k ops (100ms)
 	}
 
