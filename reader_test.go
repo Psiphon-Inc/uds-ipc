@@ -705,11 +705,11 @@ func TestReaderAcceptErrorHandling(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                    string
-		maxAcceptErrors         int
-		simulatedFailures       int
-		expectTooManyCallback   bool
-		expectEarlyReturn       bool
+		name                  string
+		maxAcceptErrors       int
+		simulatedFailures     int
+		expectTooManyCallback bool
+		expectEarlyReturn     bool
 	}{
 		{
 			name:                  "below_threshold",
