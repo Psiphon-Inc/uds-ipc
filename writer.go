@@ -118,6 +118,9 @@ func NewWriter(socketPath string, opts ...WriterOption) (*Writer, error) {
 
 // WriteMessage queues a message for sending, dropping messages and returning
 // ErrBufferFull when the queue is full (instead of blocking).
+// Callers MUST NOT modify the data slice after calling WriteMessage. The slice
+// will be retained for potential retries on write failure. If the caller needs
+// to reuse or modify the slice, they must pass a copy.
 func (w *Writer) WriteMessage(data []byte) error {
 	if len(data) < 1 {
 		return nil
@@ -185,7 +188,7 @@ func (w *Writer) Stop(ctx context.Context) error {
 	return err
 }
 
-// writeLengthPrefixedData writes length-prefixed data to the socket with a single retry.
+// writeLengthPrefixedData writes length-prefixed data to the socket.
 func (w *Writer) writeLengthPrefixedData(data []byte) error {
 	if w.conn == nil {
 		return errNoConsumerNotConnected
@@ -211,16 +214,8 @@ func (w *Writer) writeLengthPrefixedData(data []byte) error {
 		return errors.Join(ErrNoConsumer, err)
 	}
 
-	// Retry once before falling back to close+reconnect.
 	if _, err := buffers.WriteTo(w.conn); err != nil {
-		deadline = time.Now().Add(w.writeTimeout)
-		if deadlineErr := w.conn.SetWriteDeadline(deadline); deadlineErr != nil {
-			return w.classifyWriteError(errors.Join(err, deadlineErr))
-		}
-
-		if _, retryErr := buffers.WriteTo(w.conn); retryErr != nil {
-			return w.classifyWriteError(errors.Join(err, retryErr))
-		}
+		return w.classifyWriteError(err)
 	}
 
 	return nil
@@ -246,20 +241,23 @@ func (w *Writer) run() {
 	defer close(w.shutdownComplete)
 
 	// Phase 1: Normal operations.
-	w.processMessages()
+	retryMsg := w.processMessages()
 
 	// Phase 2: Graceful drain of remaining buffered messages.
-	w.drainQueuedWrites()
+	w.drainQueuedWrites(retryMsg)
 }
 
 // processMessages handles normal operation including connection management and message processing.
+// Returns any pending retry message that should be attempted during drain phase.
 // nolint: gocognit
-func (w *Writer) processMessages() {
+func (w *Writer) processMessages() []byte {
 	backoff := time.Second
+
+	var retryMsgOnReconnect []byte
 
 	for {
 		// Make sure we're connected.
-		if w.conn == nil {
+		if w.conn == nil { // nolint: nestif
 			if err := w.connect(); err != nil {
 				if w.onError != nil {
 					w.onError(err, "failed to connect")
@@ -269,7 +267,7 @@ func (w *Writer) processMessages() {
 					backoff = min(backoff*2, w.maxBackoff) //nolint: mnd // Exponential backoff.
 					continue
 				case <-w.shutdownStart:
-					return // Move to draining buffered writes phase.
+					return retryMsgOnReconnect // Move to draining buffered writes phase.
 				}
 			}
 
@@ -277,6 +275,21 @@ func (w *Writer) processMessages() {
 			// the expected minimum, but strikes a balance between fast
 			// reconnections and hammering a dead endpoint repeatedly.
 			backoff = time.Second
+
+			// If we've previously failed to write a message, it will be stored
+			// in retryMsgOnReconnect and a write should be immediately attempted
+			// with this message upon successful reconnect. Subsequent failures
+			// should continue to trigger reconnections (since failing to
+			// reconnect repeatedly will eventually hit the maximum backoff time
+			// and result in a different error pathway.
+			if retryMsgOnReconnect != nil {
+				if err := w.sendRetryMessage(retryMsgOnReconnect, "write failure after reconnect"); err != nil {
+					w.closeConn()
+					continue
+				}
+
+				retryMsgOnReconnect = nil
+			}
 		}
 
 		// Process messages.
@@ -287,18 +300,49 @@ func (w *Writer) processMessages() {
 				if w.onError != nil {
 					w.onError(err, "write failure")
 				}
+
 				w.closeConn()
+
+				// Buffer the failed message for retry on reconnect.
+				// Note: We rely on the WriteMessage API contract that callers
+				// do not modify the slice after passing it to WriteMessage.
+				retryMsgOnReconnect = data
 			} else {
 				atomic.AddUint64(&w.sentCount, 1)
 			}
 		case <-w.shutdownStart:
-			return // Move to draining buffered writes phase.
+			return retryMsgOnReconnect // Move to draining buffered writes phase.
 		}
 	}
 }
 
+// sendRetryMessage attempts to send a buffered retry message, updating metrics accordingly.
+// Returns error if write failed. Caller is responsible for connection management.
+func (w *Writer) sendRetryMessage(data []byte, context string) error {
+	if err := w.writeLengthPrefixedData(data); err != nil {
+		atomic.AddUint64(&w.failedCount, 1)
+		if w.onError != nil {
+			w.onError(err, context)
+		}
+
+		return err
+	}
+
+	atomic.AddUint64(&w.sentCount, 1)
+	return nil
+}
+
 // drainQueuedWrites handles graceful shutdown by draining remaining buffered messages.
-func (w *Writer) drainQueuedWrites() {
+func (w *Writer) drainQueuedWrites(retryMsgOnReconnect []byte) {
+	// If there's a pending retry message from normal operation, attempt to send it first.
+	if retryMsgOnReconnect != nil {
+		if err := w.sendRetryMessage(
+			retryMsgOnReconnect, "write failure during drain (retry message)",
+		); err != nil {
+			w.closeConn()
+		}
+	}
+
 	for {
 		select {
 		case data := <-w.send:
